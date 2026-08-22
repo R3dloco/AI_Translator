@@ -1,6 +1,8 @@
 import os
 import io
 import email
+import urllib.request
+import urllib.parse
 from typing import Optional, Dict, List
 import pandas as pd
 import pypdf
@@ -12,7 +14,7 @@ from ebooklib import epub
 import extract_msg
 
 class DocumentExtractor:
-    """Extracts plain text from various document formats."""
+    """Extracts text and layout structure from various document formats and Web URLs."""
     
     SUPPORTED_EXTENSIONS = {
         # Text & Markdown
@@ -45,6 +47,29 @@ class DocumentExtractor:
     @classmethod
     def get_supported_extensions(cls) -> List[str]:
         return sorted(list(cls.SUPPORTED_EXTENSIONS))
+
+    def extract_url_text(self, url: str) -> str:
+        """Fetch HTML content from a URL and extract clean body text."""
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html_content = response.read().decode('utf-8', errors='replace')
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        # Remove script and style elements
+        for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            element.decompose()
+            
+        title = soup.title.string.strip() if soup.title and soup.title.string else "Web Article"
+        body_text = soup.get_text(separator='\n').strip()
+        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+        clean_text = "\n".join(lines)
+        return f"# {title}\nURL: {url}\n\n{clean_text}"
 
     def extract_text(self, file_path_or_bytes, filename: str) -> str:
         """
@@ -85,7 +110,6 @@ class DocumentExtractor:
         elif ext in (".html", ".htm"):
             return self._extract_html(content_bytes)
         else:
-            # Fallback for plain text, markdown, json, code, etc.
             return self._extract_plain_text(content_bytes)
 
     def _extract_pdf(self, content_bytes: bytes) -> str:
@@ -93,8 +117,7 @@ class DocumentExtractor:
         reader = pypdf.PdfReader(pdf_file)
         text_parts = []
         for i, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
-            # If native text is missing or extremely short, attempt OCR on scanned page
+            page_text = page.extract_text(layout_mode_space_vertically=True) or ""
             if len(page_text.strip()) < 10:
                 try:
                     import pdf2image
@@ -118,13 +141,12 @@ class DocumentExtractor:
         docx_file = io.BytesIO(content_bytes)
         doc = docx.Document(docx_file)
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        # Also extract tables
         for table in doc.tables:
             for row in table.rows:
                 row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
                 if row_text:
                     paragraphs.append(row_text)
-        return "\n".join(paragraphs)
+        return "\n\n".join(paragraphs)
 
     def _extract_pptx(self, content_bytes: bytes) -> str:
         pptx_file = io.BytesIO(content_bytes)
@@ -207,3 +229,4 @@ class DocumentExtractor:
             except UnicodeDecodeError:
                 continue
         return content_bytes.decode('utf-8', errors='replace')
+

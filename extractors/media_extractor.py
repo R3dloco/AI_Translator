@@ -1,7 +1,7 @@
 import os
 import tempfile
 import whisper
-from typing import List, Callable, Optional
+from typing import List, Callable, Optional, Dict, Any, Tuple
 
 class MediaExtractor:
     """Extracts text/transcripts from audio and video files using OpenAI Whisper."""
@@ -24,13 +24,10 @@ class MediaExtractor:
             cache_dir = os.path.expanduser("~/.cache/whisper")
 
             try:
-                # 1. If model_name is a direct path to a local .pt model file
                 if os.path.isfile(expanded_path):
                     self._model = whisper.load_model(expanded_path)
-                # 2. If model file exists in local whisper cache ~/.cache/whisper/<name>.pt
                 elif os.path.isfile(os.path.join(cache_dir, f"{model_name_str}.pt")):
                     self._model = whisper.load_model(os.path.join(cache_dir, f"{model_name_str}.pt"))
-                # 3. Download / Load from default Whisper registry
                 else:
                     self._model = whisper.load_model(model_name_str)
             except Exception as err:
@@ -66,10 +63,52 @@ class MediaExtractor:
                 cached.append(f.rsplit(".", 1)[0])
         return sorted(cached)
 
-    def transcribe(self, file_input, filename: str, progress_callback: Optional[Callable[[str], None]] = None) -> str:
+    @staticmethod
+    def format_timestamp(seconds: float, decimal_marker: str = ",") -> str:
+        """Format seconds into HH:MM:SS,mmm timestamp string for SRT/VTT."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int((seconds - int(seconds)) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}{decimal_marker}{millis:03d}"
+
+    @classmethod
+    def generate_srt(cls, segments: List[Dict[str, Any]]) -> str:
+        """Convert Whisper segments into SRT subtitle text format."""
+        srt_lines = []
+        for idx, seg in enumerate(segments, start=1):
+            start = cls.format_timestamp(seg.get("start", 0.0), decimal_marker=",")
+            end = cls.format_timestamp(seg.get("end", 0.0), decimal_marker=",")
+            text = seg.get("text", "").strip()
+            srt_lines.append(f"{idx}\n{start} --> {end}\n{text}\n")
+        return "\n".join(srt_lines)
+
+    @classmethod
+    def generate_vtt(cls, segments: List[Dict[str, Any]]) -> str:
+        """Convert Whisper segments into WebVTT subtitle text format."""
+        vtt_lines = ["WEBVTT\n"]
+        for idx, seg in enumerate(segments, start=1):
+            start = cls.format_timestamp(seg.get("start", 0.0), decimal_marker=".")
+            end = cls.format_timestamp(seg.get("end", 0.0), decimal_marker=".")
+            text = seg.get("text", "").strip()
+            vtt_lines.append(f"{idx}\n{start} --> {end}\n{text}\n")
+        return "\n".join(vtt_lines)
+
+    def transcribe_full(
+        self,
+        file_input,
+        filename: str,
+        progress_callback: Optional[Callable[[str], None]] = None
+    ) -> Dict[str, Any]:
         """
-        Transcribe audio or video input using Whisper.
-        `file_input` can be a file path string or bytes/UploadedFile stream.
+        Transcribes media file and returns complete result dictionary:
+        {
+          "text": str,
+          "language": str,
+          "segments": list,
+          "srt": str,
+          "vtt": str
+        }
         """
         temp_file_path = None
         try:
@@ -83,7 +122,7 @@ class MediaExtractor:
                     elif isinstance(file_input, bytes):
                         tmp.write(file_input)
                     else:
-                        raise ValueError("Invalid file_input provided.")
+                        raise ValueError("Invalid file_input provided for media extraction.")
                     temp_file_path = tmp.name
                 media_path = temp_file_path
 
@@ -93,11 +132,23 @@ class MediaExtractor:
             model = self._get_model()
 
             if progress_callback:
-                progress_callback("Transcribing media audio track...")
+                progress_callback("Transcribing media audio & auto-detecting language...")
 
-            # Transcribe audio track from video/audio file
             result = model.transcribe(media_path, verbose=False)
-            return result.get("text", "").strip()
+            text = result.get("text", "").strip()
+            detected_lang = result.get("language", "unknown")
+            segments = result.get("segments", [])
+
+            srt_content = self.generate_srt(segments)
+            vtt_content = self.generate_vtt(segments)
+
+            return {
+                "text": text,
+                "language": detected_lang,
+                "segments": segments,
+                "srt": srt_content,
+                "vtt": vtt_content
+            }
 
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
@@ -105,3 +156,9 @@ class MediaExtractor:
                     os.remove(temp_file_path)
                 except Exception:
                     pass
+
+    def transcribe(self, file_input, filename: str, progress_callback: Optional[Callable[[str], None]] = None) -> str:
+        """Legacy helper returning plain transcribed text."""
+        result = self.transcribe_full(file_input, filename, progress_callback=progress_callback)
+        return result["text"]
+

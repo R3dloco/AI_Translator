@@ -93,6 +93,9 @@ class FileHandler:
             }
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+        elif format_type in ("srt", "vtt"):
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(translated_text)
         else:
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(translated_text)
@@ -112,3 +115,4 @@ class FileHandler:
                 zip_file.writestr(filename, data)
         zip_buffer.seek(0)
         return zip_buffer.getvalue()
+
